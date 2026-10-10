@@ -1,4 +1,6 @@
 import os
+import nest_asyncio
+nest_asyncio.apply()
 import yfinance as yf
 import pandas as pd
 from flask import Flask
@@ -9,7 +11,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 print("Checking BOT_TOKEN...")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    print("ERROR: BOT_TOKEN is MISSING! Add it in Render Environment!")
+    print("ERROR: BOT_TOKEN MISSING!")
 else:
     print("BOT_TOKEN found! Starting bot...")
 
@@ -24,9 +26,13 @@ SYMBOLS = {
 app_flask = Flask('')
 @app_flask.route('/')
 def home(): return "EagleX-Pro V3 LIVE!"
-def run(): app_flask.run(host='0.0.0.0', port=8080)
+
+def run():
+    app_flask.run(host='0.0.0.0', port=8080)
+
 def keep_alive():
     t = Thread(target=run)
+    t.daemon = True
     t.start()
 
 def get_data(ticker):
@@ -43,7 +49,7 @@ def analyze(symbol_key):
     ticker = SYMBOLS.get(symbol_key.upper(), "GC=F")
     df = get_data(ticker)
     if len(df) < 50:
-        return f"❌ {symbol_key}: No data for {ticker}. Try again later."
+        return f"❌ {symbol_key}: No data for {ticker}. Try again."
 
     price = float(df['Close'].iloc[-1])
     high = df['High']
@@ -56,7 +62,6 @@ def analyze(symbol_key):
     
     sweep_bsl = last_high > recent_high
     sweep_ssl = last_low < recent_low
-    
     bullish_bos = price > recent_high
     bearish_bos = price < recent_low
     structure = "BULLISH BOS" if bullish_bos else "BEARISH BOS" if bearish_bos else "RANGING"
@@ -64,21 +69,16 @@ def analyze(symbol_key):
     atr = float((high - low).rolling(14).mean().iloc[-1])
     if atr == 0: atr = price * 0.002
     
-    signal = "NEUTRAL"
-    reason = []
-    
     if sweep_ssl:
         signal = "BULLISH 🟢 BUY"
-        reason.append(f"SSL Sweep {recent_low:.2f}")
-        reason.append(f"{structure}")
+        reason = [f"SSL Sweep {recent_low:.2f}", structure]
         sl = price - (atr * 1.5)
         tp1 = price + (atr * 1.2)
         tp2 = price + (atr * 2.5)
         tp3 = price + (atr * 4.0)
     elif sweep_bsl:
         signal = "BEARISH 🔴 SELL"
-        reason.append(f"BSL Sweep {recent_high:.2f}")
-        reason.append(f"{structure}")
+        reason = [f"BSL Sweep {recent_high:.2f}", structure]
         sl = price + (atr * 1.5)
         tp1 = price - (atr * 1.2)
         tp2 = price - (atr * 2.5)
@@ -87,14 +87,14 @@ def analyze(symbol_key):
         ema50 = float(df['Close'].ewm(span=50).mean().iloc[-1])
         if price > ema50:
             signal = "BULLISH 🟢 BUY"
-            reason.append(f"{structure} | Price>EMA50")
+            reason = [f"{structure} | Price>EMA50"]
             sl = price - (atr * 1.5)
             tp1 = price + (atr * 1.5)
             tp2 = price + (atr * 3.0)
             tp3 = price + (atr * 5.0)
         else:
             signal = "BEARISH 🔴 SELL"
-            reason.append(f"{structure} | Price<EMA50")
+            reason = [f"{structure} | Price<EMA50"]
             sl = price + (atr * 1.5)
             tp1 = price - (atr * 1.5)
             tp2 = price - (atr * 3.0)
@@ -142,31 +142,4 @@ TF: 15m
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🦅 EagleX-Pro V3 LIVE!\nSend: XAU / BTC / EURUSD / GBPUSD / USDJPY / ALL")
 
-async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
-    if text == "ALL":
-        for k in ["XAU", "BTC", "EURUSD", "GBPUSD", "USDJPY"]:
-            await update.message.reply_text(analyze(k))
-        return
-    if "START" in text:
-        await start(update, context)
-        return
-    key = text.replace("/", "").replace(" ", "")[:10]
-    clean = key[:6] if key[:6] in SYMBOLS else key[:3]
-    if clean in SYMBOLS:
-        await update.message.reply_text(analyze(clean))
-    elif key in SYMBOLS:
-        await update.message.reply_text(analyze(key))
-    else:
-        await update.message.reply_text("Use: XAU, BTC, EURUSD, GBPUSD, USDJPY, ALL")
-
-if __name__ == "__main__":
-    keep_alive()
-    if not BOT_TOKEN:
-        print("BOT_TOKEN missing - bot cannot start")
-    else:
-        app = ApplicationBuilder().token(BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
-        print("EagleX-Pro V3 Starting... Polling...")
-        app.run_polling()
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE
