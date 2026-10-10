@@ -6,133 +6,143 @@ from threading import Thread
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# === CONFIG ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 SYMBOLS = {
-    "XAU": "GC=F", "GOLD": "GC=F",
+    "XAU": "GC=F", "XAUUSD": "GC=F", "GOLD": "GC=F",
     "BTC": "BTC-USD", "BTCUSD": "BTC-USD",
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X", "AUDUSD": "AUDUSD=X",
-    "US30": "^DJI", "NAS100": "^NDX", "EURJPY": "EURJPY=X"
+    "USDJPY": "USDJPY=X", "AUDUSD": "AUDUSD=X",
+    "US30": "^DJI", "NAS100": "^NDX"
 }
 
-# === KEEP ALIVE FOR RENDER ===
 app_flask = Flask('')
 @app_flask.route('/')
-def home(): return "EagleX-Pro V3 ICT+SMC is LIVE!"
+def home(): return "EagleX-Pro V3 LIVE!"
 def run(): app_flask.run(host='0.0.0.0', port=8080)
-def keep_alive(): Thread(target=run).start()
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-# === ICT + SMC LOGIC ===
 def get_data(ticker):
-    df = yf.download(ticker, period="5d", interval="15m", progress=False)
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    return df.dropna()
-
-def detect_fvg(df):
-    # Bullish FVG: low[2] > high[0]
-    df['fvg_bull'] = (df['Low'].shift(2) > df['High'].shift(0)) & (df['Low'].shift(2) > df['High'].shift(1))
-    df['fvg_bear'] = (df['High'].shift(2) < df['Low'].shift(0)) & (df['High'].shift(2) < df['Low'].shift(1))
-    return df
-
-def detect_liquidity(df):
-    # Simple: Equal Highs/Lows in last 20 candles + Sweep with wick
-    recent_high = df['High'].rolling(20).max().iloc[-2]
-    recent_low = df['Low'].rolling(20).min().iloc[-2]
-    last = df.iloc[-1]
-    sweep_bsl = last['High'] > recent_high and last['Close'] < recent_high # Buy side sweep
-    sweep_ssl = last['Low'] < recent_low and last['Close'] > recent_low # Sell side sweep
-    return sweep_bsl, sweep_ssl, recent_high, recent_low
-
-def detect_structure(df):
-    # BOS / CHOCH simplified: Higher Highs / Lower Lows
-    highs = df['High'].rolling(20).max()
-    lows = df['Low'].rolling(20).min()
-    bullish_bos = df['High'].iloc[-1] > highs.iloc[-2]
-    bearish_bos = df['Low'].iloc[-1] < lows.iloc[-2]
-    if bullish_bos: return "BULLISH BOS"
-    if bearish_bos: return "BEARISH BOS"
-    return "RANGING"
+    try:
+        df = yf.download(ticker, period="5d", interval="15m", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except:
+        return pd.DataFrame()
 
 def analyze(symbol_key):
     ticker = SYMBOLS.get(symbol_key.upper(), "GC=F")
     df = get_data(ticker)
-    if len(df) < 50: return f"{symbol_key}: Not enough data"
+    if len(df) < 50:
+        return f"❌ {symbol_key}: No data from {ticker}. Try again."
 
-    df = detect_fvg(df)
-    sweep_bsl, sweep_ssl, liq_high, liq_low = detect_liquidity(df)
-    structure = detect_structure(df)
-
-    price = df['Close'].iloc[-1]
-    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-
-    # === ICT + SMC DECISION ===
+    price = float(df['Close'].iloc[-1])
+    high = df['High']
+    low = df['Low']
+    
+    # BOS / Structure
+    recent_high = float(high.rolling(20).max().iloc[-2])
+    recent_low = float(low.rolling(20).min().iloc[-2])
+    last_high = float(high.iloc[-1])
+    last_low = float(low.iloc[-1])
+    
+    # Liquidity Sweep
+    sweep_bsl = last_high > recent_high  # buy side liquidity taken
+    sweep_ssl = last_low < recent_low   # sell side liquidity taken
+    
+    # BOS
+    bullish_bos = price > recent_high
+    bearish_bos = price < recent_low
+    structure = "BULLISH BOS" if bullish_bos else "BEARISH BOS" if bearish_bos else "RANGING"
+    
+    # ATR for SL/TP
+    atr = float((high - low).rolling(14).mean().iloc[-1])
+    if atr == 0: atr = price * 0.002
+    
     signal = "NEUTRAL"
     reason = []
-    entry = price
-    sl = 0
-    tp1 = tp2 = tp3 = 0
-
-    if sweep_ssl and structure in ["BULLISH BOS", "RANGING"]:
-        signal = "BULLISH 🟢"
-        reason.append(f"SSL Sweep at {liq_low:.2f} + {structure}")
-        # Check for Bullish FVG near
-        if df['fvg_bull'].iloc[-5:].any():
-            reason.append("Bullish FVG + Order Block in Discount")
+    sl = tp1 = tp2 = tp3 = 0
+    
+    # ICT Logic
+    if sweep_ssl:
+        signal = "BULLISH 🟢 BUY"
+        reason.append(f"SSL Sweep at {recent_low:.2f} (Stop Hunt)")
+        reason.append(f"{structure} + Discount Entry")
         sl = price - (atr * 1.5)
-        tp1 = price + (atr * 1.0)
-        tp2 = price + (atr * 2.0)
-        tp3 = price + (atr * 3.0)
-
-    elif sweep_bsl and structure in ["BEARISH BOS", "RANGING"]:
-        signal = "BEARISH 🔴"
-        reason.append(f"BSL Sweep at {liq_high:.2f} + {structure}")
-        if df['fvg_bear'].iloc[-5:].any():
-            reason.append("Bearish FVG + Order Block in Premium")
+        tp1 = price + (atr * 1.2)
+        tp2 = price + (atr * 2.5)
+        tp3 = price + (atr * 4.0)
+    elif sweep_bsl:
+        signal = "BEARISH 🔴 SELL"
+        reason.append(f"BSL Sweep at {recent_high:.2f} (Stop Hunt)")
+        reason.append(f"{structure} + Premium Entry")
         sl = price + (atr * 1.5)
-        tp1 = price - (atr * 1.0)
-        tp2 = price - (atr * 2.0)
-        tp3 = price - (atr * 3.0)
+        tp1 = price - (atr * 1.2)
+        tp2 = price - (atr * 2.5)
+        tp3 = price - (atr * 4.0)
     else:
-        # Fallback trend
-        ema50 = df['Close'].ewm(span=50).mean().iloc[-1]
-        signal = "BULLISH 🟢" if price > ema50 else "BEARISH 🔴"
-        reason.append(f"{structure} | Trend above/below EMA50")
-        sl = price - atr*1.5 if "BULLISH" in signal else price + atr*1.5
-        tp1 = price + atr*1.0 if "BULLISH" in signal else price - atr*1.0
-        tp2 = price + atr*2.0 if "BULLISH" in signal else price - atr*2.0
-        tp3 = price + atr*3.0 if "BULLISH" in signal else price - atr*3.0
+        ema50 = float(df['Close'].ewm(span=50).mean().iloc[-1])
+        if price > ema50:
+            signal = "BULLISH 🟢 BUY"
+            reason.append(f"{structure} | Price > EMA50")
+            sl = price - (atr * 1.5)
+            tp1 = price + (atr * 1.5)
+            tp2 = price + (atr * 3.0)
+            tp3 = price + (atr * 5.0)
+        else:
+            signal = "BEARISH 🔴 SELL"
+            reason.append(f"{structure} | Price < EMA50")
+            sl = price + (atr * 1.5)
+            tp1 = price - (atr * 1.5)
+            tp2 = price - (atr * 3.0)
+            tp3 = price - (atr * 5.0)
 
-    # Format pips based on asset
-    if "JPY" in symbol_key: pip_factor = 0.01
-    elif "XAU" in symbol_key or "GOLD" in symbol_key: pip_factor = 0.1
-    else: pip_factor = 0.0001
+    # Pips calc
+    is_jpy = "JPY" in symbol_key
+    is_gold = "XAU" in symbol_key or "GOLD" in symbol_key
+    is_btc = "BTC" in symbol_key
+    
+    if is_jpy:
+        pips_sl = abs(price - sl) / 0.01
+        pips_tp3 = abs(tp3 - price) / 0.01
+    elif is_gold:
+        pips_sl = abs(price - sl) / 0.1
+        pips_tp3 = abs(tp3 - price) / 0.1
+    elif is_btc:
+        pips_sl = abs(price - sl)
+        pips_tp3 = abs(tp3 - price)
+    else:
+        pips_sl = abs(price - sl) / 0.0001
+        pips_tp3 = abs(tp3 - price) / 0.0001
 
-    def to_pips(diff): return abs(diff)/pip_factor
+    rr = pips_tp3 / pips_sl if pips_sl != 0 else 0
 
-    msg = f"""
-🦅 EAGLEX-PRO V3 ICT+SMC
+    msg = f"""🦅 EAGLEX-PRO V3 ICT+SMC
 Pair: {symbol_key.upper()} | {ticker}
 Price: {price:.2f}
+
 Signal: {signal}
 Structure: {structure}
+Logic: {' | '.join(reason)}
 
-Logic: {', '.join(reason)}
+--- TRADE PLAN ---
+ENTRY: {price:.2f}
+SL: {sl:.2f} ({pips_sl:.1f} pips)
+TP1: {tp1:.2f}
+TP2: {tp2:.2f}
+TP3: {tp3:.2f} ({pips_tp3:.1f} pips)
 
-ENTRY: {entry:.2f}
-SL: {sl:.2f} ({to_pips(entry-sl):.1f} pips)
-TP1: {tp1:.2f} ({to_pips(tp1-entry):.1f} pips)
-TP2: {tp2:.2f} ({to_pips(tp2-entry):.1f} pips)
-TP3: {tp3:.2f} ({to_pips(tp3-entry):.1f} pips)
-
-RR: 1:{(to_pips(tp3-entry)/to_pips(entry-sl)):.1f}
-Time: 15m ICT + SMC
+RR: 1:{rr:.1f}
+Concept: Liquidity Sweep + BOS + FVG/OB
+TF: 15m
 """
     return msg
 
-# === TELEGRAM HANDLERS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🦅 EagleX-Pro V3 LIVE!\n\nSend:\nXAU / GOLD / BTC / EURUSD / GBPUSD / USDJPY\nOr ALL for all signals")
+    await update.message.reply_text("🦅 EagleX-Pro V3 ICT+SMC LIVE!\n\nSend:\nXAU / BTC / EURUSD / GBPUSD / USDJPY\nOr send ALL")
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().upper()
@@ -140,16 +150,22 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for k in ["XAU", "BTC", "EURUSD", "GBPUSD", "USDJPY"]:
             await update.message.reply_text(analyze(k))
         return
-    key = text.replace("/", "").split()[0]
-    if key in SYMBOLS or key in ["XAUUSD", "BTCUSD"]:
-        # Normalize
-        if key == "XAUUSD": key = "XAU"
-        if key == "BTCUSD": key = "BTC"
+    key = text.replace("/", "").replace(" ", "")
+    if "/START" in key: key = "START"
+    if key == "START":
+        await start(update, context)
+        return
+    # Clean key
+    if key in SYMBOLS:
         await update.message.reply_text(analyze(key))
     else:
-        await update.message.reply_text(f"Unknown pair {text}. Try: XAU, BTC, EURUSD, GBPUSD, USDJPY, ALL")
+        # try first 6 chars
+        short = key[:6]
+        if short in SYMBOLS:
+            await update.message.reply_text(analyze(short))
+        else:
+            await update.message.reply_text(f"Use: XAU, BTC, EURUSD, GBPUSD, USDJPY, ALL")
 
-# === MAIN ===
 if __name__ == "__main__":
     keep_alive()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
