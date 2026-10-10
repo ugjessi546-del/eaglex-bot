@@ -1,3 +1,4 @@
-pyTelegramBotAPI
-requests
-flask
+flask==2.3.3
+python-telegram-bot==20.7
+yfinance
+pandas
